@@ -32,10 +32,14 @@
 -export([exception/2]).
 -export([passthrough/1]).
 -export([history/1]).
+-export([history/2]).
 -export([validate/1]).
 -export([unload/0]).
 -export([unload/1]).
 -export([called/3]).
+-export([called/4]).
+-export([num_calls/3]).
+-export([num_calls/4]).
 
 %% Callback exports
 -export([init/1]).
@@ -44,21 +48,22 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 -export([code_change/3]).
--export([exec/4]).
+-export([exec/5]).
 
 %% Types
 %% @type meck_mfa() = {Mod::atom(), Func::atom(), Args::list(term())}.
 %% Module, function and arguments that the mock module got called with.
 -type meck_mfa() :: {Mod::atom(), Func::atom(), Args::[term()]}.
 
-%% @type history() = [{meck_mfa(), Result::term()}
-%%                     | {meck_mfa(), Class:: exit | error | throw,
+%% @type history() = [{pid(), meck_mfa(), Result::term()}
+%%                     | {pid(), meck_mfa(), Class:: exit | error | throw,
 %%                        Reason::term(), Stacktrace::list(mfa())}].
-%% History is a list of either successful function calls with a
-%% returned result or function calls that resulted in an exception
-%% with a type, reason and a stack trace.
--type history() :: [{meck_mfa(), Result::term()}
-                    | {meck_mfa(), Class:: exit | error | throw,
+%% History is a list of either successful function calls with a returned
+%% result or function calls that resulted in an exception with a type,
+%% reason and a stack trace. Each tuple begins with the pid of the process
+%% that made the call to the function.
+-type history() :: [{pid(), meck_mfa(), Result::term()}
+                    | {pid(), meck_mfa(), Class:: exit | error | throw,
                        Reason::term(), Stacktrace::[mfa()]}].
 
 %% Records
@@ -231,7 +236,7 @@ passthrough(Args) -> throw(passthrough_fun(Args)).
 %% arguments or non-existing function (undef), wrong arguments
 %% (function clause) or unexpected exceptions.
 %%
-%% Use the {@link history/1} function to analyze errors.
+%% Use the {@link history/1} or {@link history/2} function to analyze errors.
 -spec validate(Mod:: atom() | [atom()]) -> boolean().
 validate(Mod) when is_atom(Mod) ->
     call(Mod, validate);
@@ -239,13 +244,27 @@ validate(Mod) when is_list(Mod) ->
     not lists:member(false, [validate(M) || M <- Mod]).
 
 %% @spec history(Mod::atom()) -> history()
-%% @doc Return the call history of the mocked module.
+%% @doc Return the call history of the mocked module for all processes.
 %%
-%% Returns a list of calls to the mocked module and their
-%% results. Results can be either normal Erlang terms or exceptions
-%% that occurred.
+%% @equiv history(Mod, '_')
 -spec history(Mod::atom()) -> history().
 history(Mod) when is_atom(Mod) -> call(Mod, history).
+
+%% @spec history(Mod::atom(), Pid::pid()) -> history()
+%% @doc Return the call history of the mocked module for the specified process.
+%%
+%% Returns a list of calls to the mocked module and their results for
+%% the specified `Pid'.  Results can be either normal Erlang terms or
+%% exceptions that occurred.
+%%
+%% @see history/1
+%% @see called/3
+%% @see called/4
+%% @see num_calls/3
+%% @see num_calls/4
+-spec history(Mod::atom(), Pid:: pid() | '_') -> history().
+history(Mod, Pid) when is_atom(Mod), is_pid(Pid) orelse Pid == '_' -> 
+    match_history(match_mfa('_', Pid), call(Mod, history)).
 
 %% @spec unload() -> list(atom())
 %% @doc Unloads all mocked modules from memory.
@@ -269,12 +288,48 @@ unload(Mods) when is_list(Mods) -> lists:foreach(fun unload/1, Mods), ok.
 %% @spec called(Mod:: atom(), Fun:: atom(), Args:: list(term())) -> boolean()
 %% @doc Returns whether `Mod:Func' has been called with `Args'.
 %%
-%% This will check the history for the module, `Mod', to determine
-%% whether the function, `Fun', was called with arguments, `Args'. If
-%% so, this function returns true, otherwise false.
--spec called(Mod::atom(), Fun::atom(), Args::list()) -> boolean().
+%% @equiv called(Mod, Fun, Args, '_')
 called(Mod, Fun, Args) ->
     has_call({Mod, Fun, Args}, meck:history(Mod)).
+
+%% @spec called(Mod:: atom(), Fun:: atom(), Args:: list(term()),
+%%              Pid::pid()) -> boolean()
+%% @doc Returns whether `Pid' has called `Mod:Func' with `Args'.
+%%
+%% This will check the history for the module, `Mod', to determine
+%% whether process `Pid' call the function, `Fun', with arguments, `Args'. If
+%% so, this function returns true, otherwise false.
+%%
+%% Wildcards can be used, at any level in any term, by using the underscore
+%% atom: ``'_' ''
+%%
+%% @see called/3
+-spec called(Mod::atom(), Fun::atom(), Args::list(), Pid::pid()) -> boolean().
+called(Mod, Fun, Args, Pid) ->
+    has_call({Mod, Fun, Args}, meck:history(Mod, Pid)).
+
+%% @spec num_calls(Mod:: atom(), Fun:: atom(), Args:: list(term()))
+%% -> non_neg_integer()
+%% @doc Returns the number of times `Mod:Func' has been called with `Args'.
+%%
+%% @equiv num_calls(Mod, Fun, Args, '_')
+num_calls(Mod, Fun, Args) ->
+    num_calls({Mod, Fun, Args}, meck:history(Mod)).
+
+%% @spec num_calls(Mod:: atom(), Fun:: atom(), Args:: list(term()),
+%%                 Pid::pid()) -> non_neg_integer()
+%% @doc Returns the number of times process `Pid' has called `Mod:Func'
+%%      with `Args'.
+%%
+%% This will check the history for the module, `Mod', to determine how
+%% many times process `Pid' has called the function, `Fun', with
+%% arguments, `Args' and returns the result.
+%%
+%% @see num_calls/3
+-spec num_calls(Mod::atom(), Fun::atom(), Args::list(), Pid::pid()) ->
+    non_neg_integer().
+num_calls(Mod, Fun, Args, Pid) ->
+    num_calls({Mod, Fun, Args}, meck:history(Mod, Pid)).
 
 %%==============================================================================
 %% Callback functions
@@ -349,19 +404,19 @@ terminate(_Reason, #state{mod = Mod, original = OriginalState, was_sticky = WasS
 code_change(_OldVsn, S, _Extra) -> {ok, S}.
 
 %% @hidden
-exec(Mod, Func, Arity, Args) ->
+exec(Pid, Mod, Func, Arity, Args) ->
     Expect = call(Mod, {get_expect, Func, Arity}),
     try Result = call_expect(Mod, Func, Expect, Args),
-        cast(Mod, {add_history, {{Mod, Func, Args}, Result}}),
+        add_history(Pid, Mod, Func, Args, Result),
         Result
     catch
         throw:Fun when is_function(Fun) ->
             case is_mock_exception(Fun) of
-                true  -> handle_mock_exception(Mod, Func, Fun, Args);
-                false -> invalidate_and_raise(Mod, Func, Args, throw, Fun)
+                true  -> handle_mock_exception(Pid, Mod, Func, Fun, Args);
+                false -> invalidate_and_raise(Pid, Mod, Func, Args, throw, Fun)
             end;
         Class:Reason ->
-            invalidate_and_raise(Mod, Func, Args, Class, Reason)
+            invalidate_and_raise(Pid, Mod, Func, Args, Class, Reason)
     end.
 
 %%==============================================================================
@@ -479,7 +534,10 @@ func_exec(Mod, Func, Arity) ->
     ?function(Func, Arity,
               [?clause(Args,
                        [?call(?MODULE, exec,
-                              [?atom(Mod), ?atom(Func), ?integer(Arity),
+                              [?call(erlang, self, []),
+                               ?atom(Mod),
+                               ?atom(Func),
+                               ?integer(Arity),
                                list(Args)])])]).
 
 func_native(Mod, Func, Arity, Result) ->
@@ -492,7 +550,8 @@ func_native(Mod, Func, Arity, Result) ->
            [?call(gen_server, cast,
                   [?atom(proc_name(Mod)),
                    ?tuple([?atom(add_history),
-                           ?tuple([?tuple([?atom(Mod), ?atom(Func),
+                           ?tuple([?call(erlang, self, []),
+                                   ?tuple([?atom(Mod), ?atom(Func),
                                            list(Args)]),
                                    AbsResult])])]),
             AbsResult])]).
@@ -541,27 +600,27 @@ is_local_function(Fun) ->
     {module, Module} = erlang:fun_info(Fun, module),
     ?MODULE == Module.
 
-handle_mock_exception(Mod, Func, Fun, Args) ->
+handle_mock_exception(Pid, Mod, Func, Fun, Args) ->
     case Fun() of
         {exception, Class, Reason} ->
             % exception created with the mock:exception function,
             % do not invalidate Mod
-            raise(Mod, Func, Args, Class, Reason);
+            raise(Pid, Mod, Func, Args, Class, Reason);
         {passthrough, PassthroughArgs} ->
             % call_original(Args) called from mock function
             Result = apply(original_name(Mod), Func, PassthroughArgs),
-            cast(Mod, {add_history, {{Mod, Func, PassthroughArgs}, Result}}),
+            add_history(Pid, Mod, Func, PassthroughArgs, Result),
             Result
     end.
 
--spec invalidate_and_raise(_, _, _, _, _) -> no_return().
-invalidate_and_raise(Mod, Func, Args, Class, Reason) ->
+-spec invalidate_and_raise(_, _, _, _, _, _) -> no_return().
+invalidate_and_raise(Pid, Mod, Func, Args, Class, Reason) ->
     call(Mod, invalidate),
-    raise(Mod, Func, Args, Class, Reason).
+    raise(Pid, Mod, Func, Args, Class, Reason).
 
-raise(Mod, Func, Args, Class, Reason) ->
+raise(Pid, Mod, Func, Args, Class, Reason) ->
     Stacktrace = inject(Mod, Func, Args, erlang:get_stacktrace()),
-    cast(Mod, {add_history, {{Mod, Func, Args}, Class, Reason, Stacktrace}}),
+    add_history(Pid, Mod, Func, Args, Class, Reason, Stacktrace),
     erlang:raise(Class, Reason, Stacktrace).
 
 mock_exception_fun(Class, Reason) -> fun() -> {exception, Class, Reason} end.
@@ -664,10 +723,26 @@ cleanup(Mod) ->
 
 %% --- History utilities -------------------------------------------------------
 
-has_call({_M, _F, _A}, []) -> false;
-has_call({M, F, A}, [{{M, F, A}, _Result} | _Rest]) ->
-    true;
-has_call({M, F, A}, [{{M, F, A}, _ExType, _Exception, _Stack} | _Rest]) ->
-    true;
-has_call({M, F, A}, [_Call | Rest]) ->
-    has_call({M, F, A}, Rest).
+add_history(Pid, Mod, Func, Args, Result) ->
+    add_history(Mod, {Pid, {Mod, Func, Args}, Result}).
+add_history(Pid, Mod, Func, Args, Class, Reason, Stacktrace) ->
+    add_history(Mod, {Pid, {Mod, Func, Args}, Class, Reason, Stacktrace}).
+
+add_history(Mod, Item) ->
+    cast(Mod, {add_history, Item}).
+
+has_call(MFA, History) ->
+    [] =/= match_history(match_mfa(MFA), History).
+
+num_calls(MFA, History) ->
+    length(match_history(match_mfa(MFA), History)).
+
+match_history(MatchSpec, History) ->
+    MS = ets:match_spec_compile(MatchSpec),
+    ets:match_spec_run(History, MS).
+
+match_mfa(MFA) -> match_mfa(MFA, '_').
+
+match_mfa(MFA, Pid) ->
+    [{{Pid, MFA, '_'}, [], ['$_']},
+     {{Pid, MFA, '_', '_', '_'}, [], ['$_']}].
