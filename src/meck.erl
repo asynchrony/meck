@@ -578,7 +578,7 @@ call_expect(_Mod, _Func, Fun, VarList) when is_function(Fun) ->
 
 inject(_Mod, _Func, _Args, []) ->
     [];
-inject(Mod, Func, Args, [{meck, exec, _Arity} = Meck|Stack]) ->
+inject(Mod, Func, Args, [{meck, exec, _Arity, _Filenum} = Meck|Stack]) ->
     [Meck, {Mod, Func, Args}|Stack];
 inject(Mod, Func, Args, [H|Stack]) ->
     [H|inject(Mod, Func, Args, Stack)].
