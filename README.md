@@ -1,4 +1,5 @@
-[![Build Status](https://secure.travis-ci.org/eproxus/meck.png)](http://travis-ci.org/eproxus/meck)
+[![Build
+Status](https://secure.travis-ci.org/asynchrony/meck.png)](http://travis-ci.org/asynchrony/meck)
 
   * [Introduction](#introduction)
   * [Features](#features)
