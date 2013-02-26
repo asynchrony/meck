@@ -32,10 +32,14 @@
 -export([exception/2]).
 -export([passthrough/1]).
 -export([history/1]).
+-export([history/2]).
 -export([validate/1]).
 -export([unload/0]).
 -export([unload/1]).
 -export([called/3]).
+-export([called/4]).
+-export([num_calls/3]).
+-export([num_calls/4]).
 
 %% Callback exports
 -export([init/1]).
@@ -44,21 +48,22 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 -export([code_change/3]).
--export([exec/4]).
+-export([exec/5]).
 
 %% Types
 %% @type meck_mfa() = {Mod::atom(), Func::atom(), Args::list(term())}.
 %% Module, function and arguments that the mock module got called with.
 -type meck_mfa() :: {Mod::atom(), Func::atom(), Args::[term()]}.
 
-%% @type history() = [{meck_mfa(), Result::term()}
-%%                     | {meck_mfa(), Class:: exit | error | throw,
+%% @type history() = [{pid(), meck_mfa(), Result::term()}
+%%                     | {pid(), meck_mfa(), Class:: exit | error | throw,
 %%                        Reason::term(), Stacktrace::list(mfa())}].
-%% History is a list of either successful function calls with a
-%% returned result or function calls that resulted in an exception
-%% with a type, reason and a stack trace.
--type history() :: [{meck_mfa(), Result::term()}
-                    | {meck_mfa(), Class:: exit | error | throw,
+%% History is a list of either successful function calls with a returned
+%% result or function calls that resulted in an exception with a type,
+%% reason and a stack trace. Each tuple begins with the pid of the process
+%% that made the call to the function.
+-type history() :: [{pid(), meck_mfa(), Result::term()}
+                    | {pid(), meck_mfa(), Class:: exit | error | throw,
                        Reason::term(), Stacktrace::[mfa()]}].
 
 %% Records
@@ -101,6 +106,12 @@ new(Mod) when is_list(Mod) -> lists:foreach(fun new/1, Mod), ok.
 %%   <dt>`unstick'</dt>    <dd>Unstick the module to be mocked (e.g. needed
 %%                             for using meck with kernel and stdlib modules).
 %%                         </dd>
+%%   <dt>`no_passthrough_cover'</dt><dd>If cover is enabled on the module to be
+%%                                      mocked then meck will continue to
+%%                                      capture coverage on passthrough calls.
+%%                                      This option allows you to disable that
+%%                                      feature if it causes problems.
+%%                                  </dd>
 %% </dl>
 -spec new(Mod:: atom() | [atom()], Options::[term()]) -> ok.
 new(Mod, Options) when is_atom(Mod), is_list(Options) ->
@@ -231,7 +242,7 @@ passthrough(Args) -> throw(passthrough_fun(Args)).
 %% arguments or non-existing function (undef), wrong arguments
 %% (function clause) or unexpected exceptions.
 %%
-%% Use the {@link history/1} function to analyze errors.
+%% Use the {@link history/1} or {@link history/2} function to analyze errors.
 -spec validate(Mod:: atom() | [atom()]) -> boolean().
 validate(Mod) when is_atom(Mod) ->
     call(Mod, validate);
@@ -239,13 +250,27 @@ validate(Mod) when is_list(Mod) ->
     not lists:member(false, [validate(M) || M <- Mod]).
 
 %% @spec history(Mod::atom()) -> history()
-%% @doc Return the call history of the mocked module.
+%% @doc Return the call history of the mocked module for all processes.
 %%
-%% Returns a list of calls to the mocked module and their
-%% results. Results can be either normal Erlang terms or exceptions
-%% that occurred.
+%% @equiv history(Mod, '_')
 -spec history(Mod::atom()) -> history().
 history(Mod) when is_atom(Mod) -> call(Mod, history).
+
+%% @spec history(Mod::atom(), Pid::pid()) -> history()
+%% @doc Return the call history of the mocked module for the specified process.
+%%
+%% Returns a list of calls to the mocked module and their results for
+%% the specified `Pid'.  Results can be either normal Erlang terms or
+%% exceptions that occurred.
+%%
+%% @see history/1
+%% @see called/3
+%% @see called/4
+%% @see num_calls/3
+%% @see num_calls/4
+-spec history(Mod::atom(), Pid:: pid() | '_') -> history().
+history(Mod, Pid) when is_atom(Mod), is_pid(Pid) orelse Pid == '_' -> 
+    match_history(match_mfa('_', Pid), call(Mod, history)).
 
 %% @spec unload() -> list(atom())
 %% @doc Unloads all mocked modules from memory.
@@ -269,12 +294,48 @@ unload(Mods) when is_list(Mods) -> lists:foreach(fun unload/1, Mods), ok.
 %% @spec called(Mod:: atom(), Fun:: atom(), Args:: list(term())) -> boolean()
 %% @doc Returns whether `Mod:Func' has been called with `Args'.
 %%
-%% This will check the history for the module, `Mod', to determine
-%% whether the function, `Fun', was called with arguments, `Args'. If
-%% so, this function returns true, otherwise false.
--spec called(Mod::atom(), Fun::atom(), Args::list()) -> boolean().
+%% @equiv called(Mod, Fun, Args, '_')
 called(Mod, Fun, Args) ->
     has_call({Mod, Fun, Args}, meck:history(Mod)).
+
+%% @spec called(Mod:: atom(), Fun:: atom(), Args:: list(term()),
+%%              Pid::pid()) -> boolean()
+%% @doc Returns whether `Pid' has called `Mod:Func' with `Args'.
+%%
+%% This will check the history for the module, `Mod', to determine
+%% whether process `Pid' call the function, `Fun', with arguments, `Args'. If
+%% so, this function returns true, otherwise false.
+%%
+%% Wildcards can be used, at any level in any term, by using the underscore
+%% atom: ``'_' ''
+%%
+%% @see called/3
+-spec called(Mod::atom(), Fun::atom(), Args::list(), Pid::pid()) -> boolean().
+called(Mod, Fun, Args, Pid) ->
+    has_call({Mod, Fun, Args}, meck:history(Mod, Pid)).
+
+%% @spec num_calls(Mod:: atom(), Fun:: atom(), Args:: list(term()))
+%% -> non_neg_integer()
+%% @doc Returns the number of times `Mod:Func' has been called with `Args'.
+%%
+%% @equiv num_calls(Mod, Fun, Args, '_')
+num_calls(Mod, Fun, Args) ->
+    num_calls({Mod, Fun, Args}, meck:history(Mod)).
+
+%% @spec num_calls(Mod:: atom(), Fun:: atom(), Args:: list(term()),
+%%                 Pid::pid()) -> non_neg_integer()
+%% @doc Returns the number of times process `Pid' has called `Mod:Func'
+%%      with `Args'.
+%%
+%% This will check the history for the module, `Mod', to determine how
+%% many times process `Pid' has called the function, `Fun', with
+%% arguments, `Args' and returns the result.
+%%
+%% @see num_calls/3
+-spec num_calls(Mod::atom(), Fun::atom(), Args::list(), Pid::pid()) ->
+    non_neg_integer().
+num_calls(Mod, Fun, Args, Pid) ->
+    num_calls({Mod, Fun, Args}, meck:history(Mod, Pid)).
 
 %%==============================================================================
 %% Callback functions
@@ -287,11 +348,12 @@ init([Mod, Options]) ->
                             unstick_original(Mod);
                     _    -> false
                 end,
-    Original = backup_original(Mod),
+    NoPassCover = proplists:get_bool(no_passthrough_cover, Options),
+    Original = backup_original(Mod, NoPassCover),
     process_flag(trap_exit, true),
     Expects = init_expects(Mod, Options),
     try
-        meck_mod:compile_and_load_forms(to_forms(Mod, Expects)),
+        _Bin = meck_mod:compile_and_load_forms(to_forms(Mod, Expects)),
         {ok, #state{mod = Mod, expects = Expects, original = Original,
                     was_sticky = WasSticky}}
     catch
@@ -340,7 +402,9 @@ handle_cast(_Msg, S)  ->
 handle_info(_Info, S) -> {noreply, S}.
 
 %% @hidden
-terminate(_Reason, #state{mod = Mod, original = OriginalState, was_sticky = WasSticky}) ->
+terminate(_Reason, #state{mod = Mod, original = OriginalState,
+                          was_sticky = WasSticky}) ->
+    export_original_cover(Mod, OriginalState),
     cleanup(Mod),
     restore_original(Mod, OriginalState, WasSticky),
     ok.
@@ -349,19 +413,19 @@ terminate(_Reason, #state{mod = Mod, original = OriginalState, was_sticky = WasS
 code_change(_OldVsn, S, _Extra) -> {ok, S}.
 
 %% @hidden
-exec(Mod, Func, Arity, Args) ->
+exec(Pid, Mod, Func, Arity, Args) ->
     Expect = call(Mod, {get_expect, Func, Arity}),
     try Result = call_expect(Mod, Func, Expect, Args),
-        cast(Mod, {add_history, {{Mod, Func, Args}, Result}}),
+        add_history(Pid, Mod, Func, Args, Result),
         Result
     catch
         throw:Fun when is_function(Fun) ->
             case is_mock_exception(Fun) of
-                true  -> handle_mock_exception(Mod, Func, Fun, Args);
-                false -> invalidate_and_raise(Mod, Func, Args, throw, Fun)
+                true  -> handle_mock_exception(Pid, Mod, Func, Fun, Args);
+                false -> invalidate_and_raise(Pid, Mod, Func, Args, throw, Fun)
             end;
         Class:Reason ->
-            invalidate_and_raise(Mod, Func, Args, Class, Reason)
+            invalidate_and_raise(Pid, Mod, Func, Args, Class, Reason)
     end.
 
 %%==============================================================================
@@ -401,7 +465,11 @@ unload_if_mocked(P, L) when length(P) > 5 ->
     case lists:split(length(P) - 5, P) of
         {Name, "_meck"} ->
             Mocked = list_to_existing_atom(Name),
-            unload(Mocked),
+            try
+                unload(Mocked)
+            catch error:{not_mocked, Mocked} ->
+                    ok
+            end,
             [Mocked|L];
         _Else ->
             L
@@ -450,7 +518,7 @@ delete_expect(Mod, Func, Arity, Expects) ->
 
 change_expects(Op, Mod, Func, Value, Expects) ->
     NewExpects = Op(Expects, Func, Value),
-    meck_mod:compile_and_load_forms(to_forms(Mod, NewExpects)),
+    _Bin = meck_mod:compile_and_load_forms(to_forms(Mod, NewExpects)),
     NewExpects.
 
 e_store(Expects, Func, Expect) ->
@@ -479,7 +547,10 @@ func_exec(Mod, Func, Arity) ->
     ?function(Func, Arity,
               [?clause(Args,
                        [?call(?MODULE, exec,
-                              [?atom(Mod), ?atom(Func), ?integer(Arity),
+                              [?call(erlang, self, []),
+                               ?atom(Mod),
+                               ?atom(Func),
+                               ?integer(Arity),
                                list(Args)])])]).
 
 func_native(Mod, Func, Arity, Result) ->
@@ -492,7 +563,8 @@ func_native(Mod, Func, Arity, Result) ->
            [?call(gen_server, cast,
                   [?atom(proc_name(Mod)),
                    ?tuple([?atom(add_history),
-                           ?tuple([?tuple([?atom(Mod), ?atom(Func),
+                           ?tuple([?call(erlang, self, []),
+                                   ?tuple([?atom(Mod), ?atom(Func),
                                            list(Args)]),
                                    AbsResult])])]),
             AbsResult])]).
@@ -541,27 +613,27 @@ is_local_function(Fun) ->
     {module, Module} = erlang:fun_info(Fun, module),
     ?MODULE == Module.
 
-handle_mock_exception(Mod, Func, Fun, Args) ->
+handle_mock_exception(Pid, Mod, Func, Fun, Args) ->
     case Fun() of
         {exception, Class, Reason} ->
             % exception created with the mock:exception function,
             % do not invalidate Mod
-            raise(Mod, Func, Args, Class, Reason);
+            raise(Pid, Mod, Func, Args, Class, Reason);
         {passthrough, PassthroughArgs} ->
             % call_original(Args) called from mock function
             Result = apply(original_name(Mod), Func, PassthroughArgs),
-            cast(Mod, {add_history, {{Mod, Func, PassthroughArgs}, Result}}),
+            add_history(Pid, Mod, Func, PassthroughArgs, Result),
             Result
     end.
 
--spec invalidate_and_raise(_, _, _, _, _) -> no_return().
-invalidate_and_raise(Mod, Func, Args, Class, Reason) ->
+-spec invalidate_and_raise(_, _, _, _, _, _) -> no_return().
+invalidate_and_raise(Pid, Mod, Func, Args, Class, Reason) ->
     call(Mod, invalidate),
-    raise(Mod, Func, Args, Class, Reason).
+    raise(Pid, Mod, Func, Args, Class, Reason).
 
-raise(Mod, Func, Args, Class, Reason) ->
+raise(Pid, Mod, Func, Args, Class, Reason) ->
     Stacktrace = inject(Mod, Func, Args, erlang:get_stacktrace()),
-    cast(Mod, {add_history, {{Mod, Func, Args}, Class, Reason, Stacktrace}}),
+    add_history(Pid, Mod, Func, Args, Class, Reason, Stacktrace),
     erlang:raise(Class, Reason, Stacktrace).
 
 mock_exception_fun(Class, Reason) -> fun() -> {exception, Class, Reason} end.
@@ -580,6 +652,8 @@ inject(_Mod, _Func, _Args, []) ->
     [];
 inject(Mod, Func, Args, [{meck, exec, _Arity, _Filenum} = Meck|Stack]) ->
     [Meck, {Mod, Func, Args}|Stack];
+inject(Mod, Func, Args, [{meck, exec, _Arity, _Location, _Filenum} = Meck|Stack]) ->
+    [Meck, {Mod, Func, Args}|Stack];
 inject(Mod, Func, Args, [H|Stack]) ->
     [H|inject(Mod, Func, Args, Stack)].
 
@@ -587,23 +661,51 @@ is_mock_exception(Fun) -> is_local_function(Fun).
 
 %% --- Original module handling ------------------------------------------------
 
-backup_original(Module) ->
+backup_original(Module, NoPassCover) ->
     Cover = get_cover_state(Module),
     try
         Forms = meck_mod:abstract_code(meck_mod:beam_file(Module)),
         NewName = original_name(Module),
-        meck_mod:compile_and_load_forms(meck_mod:rename_module(Forms, NewName),
-                                        meck_mod:compile_options(Module))
-    catch
-        throw:{object_code_not_found, _Module} -> ok; % TODO: What to do here?
-        throw:no_abstract_code                 -> ok  % TODO: What to do here?
-    end,
-    Cover.
+        CompileOpts = meck_mod:compile_options(meck_mod:beam_file(Module)),
+        Renamed = meck_mod:rename_module(Forms, NewName),
+        Binary = meck_mod:compile_and_load_forms(Renamed, CompileOpts),
 
-restore_original(Mod, false, WasSticky) ->
+        %% At this point we care about `Binary' if and only if we want
+        %% to recompile it to enable cover on the original module code
+        %% so that we can still collect cover stats on functions that
+        %% have not been mocked.  Below are the different values
+        %% passed back along with `Cover'.
+        %%
+        %% `no_passthrough_cover' - there is no coverage on the
+        %% original module OR passthrough coverage has been disabled
+        %% via the `no_passthrough_cover' option
+        %%
+        %% `no_binary' - something went wrong while trying to compile
+        %% the original module in `backup_original'
+        %%
+        %% Binary - a `binary()' of the compiled code for the original
+        %% module that is being mocked, this needs to be passed around
+        %% so that it can be passed to Cover later.  There is no way
+        %% to use the code server to access this binary without first
+        %% saving it to disk.  Instead, it's passed around as state.
+        if (Cover == false) orelse NoPassCover ->
+                Binary2 = no_passthrough_cover;
+           true ->
+                Binary2 = Binary,
+                meck_cover:compile_beam(NewName, Binary2)
+        end,
+        {Cover, Binary2}
+    catch
+        throw:{object_code_not_found, _Module} ->
+            {Cover, no_binary}; % TODO: What to do here?
+        throw:no_abstract_code                 ->
+            {Cover, no_binary} % TODO: What to do here?
+    end.
+
+restore_original(Mod, {false, _}, WasSticky) ->
     restick_original(Mod, WasSticky),
     ok;
-restore_original(Mod, {File, Data, Options}, WasSticky) ->
+restore_original(Mod, OriginalState={{File, Data, Options},_}, WasSticky) ->
     case filename:extension(File) of
         ".erl" ->
             {ok, Mod} = cover:compile_module(File, Options);
@@ -611,9 +713,31 @@ restore_original(Mod, {File, Data, Options}, WasSticky) ->
             cover:compile_beam(File)
     end,
     restick_original(Mod, WasSticky),
+    import_original_cover(Mod, OriginalState),
     ok = cover:import(Data),
     ok = file:delete(Data),
     ok.
+
+%% @doc Import the cover data for `<name>_meck_original' but since it
+%% was modified by `export_original_cover' it will count towards
+%% `<name>'.
+import_original_cover(Mod, {_,Bin}) when is_binary(Bin) ->
+    OriginalData = atom_to_list(original_name(Mod)) ++ ".coverdata",
+    ok = cover:import(OriginalData),
+    ok = file:delete(OriginalData);
+import_original_cover(_, _) ->
+    ok.
+
+%% @doc Export the cover data for `<name>_meck_original' and modify
+%% the data so it can be imported under `<name>'.
+export_original_cover(Mod, {_, Bin}) when is_binary(Bin) ->
+    OriginalMod = original_name(Mod),
+    File = atom_to_list(OriginalMod) ++ ".coverdata",
+    ok = cover:export(File, OriginalMod),
+    ok = meck_cover:rename_module(File, Mod);
+export_original_cover(_, _) ->
+    ok.
+
 
 unstick_original(Module) -> unstick_original(Module, code:is_sticky(Module)).
 
@@ -664,10 +788,26 @@ cleanup(Mod) ->
 
 %% --- History utilities -------------------------------------------------------
 
-has_call({_M, _F, _A}, []) -> false;
-has_call({M, F, A}, [{{M, F, A}, _Result} | _Rest]) ->
-    true;
-has_call({M, F, A}, [{{M, F, A}, _ExType, _Exception, _Stack} | _Rest]) ->
-    true;
-has_call({M, F, A}, [_Call | Rest]) ->
-    has_call({M, F, A}, Rest).
+add_history(Pid, Mod, Func, Args, Result) ->
+    add_history(Mod, {Pid, {Mod, Func, Args}, Result}).
+add_history(Pid, Mod, Func, Args, Class, Reason, Stacktrace) ->
+    add_history(Mod, {Pid, {Mod, Func, Args}, Class, Reason, Stacktrace}).
+
+add_history(Mod, Item) ->
+    cast(Mod, {add_history, Item}).
+
+has_call(MFA, History) ->
+    [] =/= match_history(match_mfa(MFA), History).
+
+num_calls(MFA, History) ->
+    length(match_history(match_mfa(MFA), History)).
+
+match_history(MatchSpec, History) ->
+    MS = ets:match_spec_compile(MatchSpec),
+    ets:match_spec_run(History, MS).
+
+match_mfa(MFA) -> match_mfa(MFA, '_').
+
+match_mfa(MFA, Pid) ->
+    [{{Pid, MFA, '_'}, [], ['$_']},
+     {{Pid, MFA, '_', '_', '_'}, [], ['$_']}].

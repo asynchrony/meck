@@ -15,7 +15,7 @@ if [ ! -f CHANGELOG ]; then
     echo "fatal: CHANGELOG missing" >&2
     exit 128
 fi
-if [ ! -z "$(git status)" ]; then
+if [ ! -z "$(git status --short)" ]; then
     # Sanity check
     echo "fatal: dirty repository" >&2
     exit 128
@@ -29,7 +29,9 @@ git add CHANGELOG
 
 # Update version in .app file
 sed -i "" -e "s/{vsn, .*}/{vsn, \"$1\"}/g" src/meck.app.src
+sed -i "" -e "s/@version .*/@version $1/g" doc/overview.edoc
 git add src/meck.app.src
+git add doc/overview.edoc
 
 # Commit, tag and push
 git commit -m "Version $1"
